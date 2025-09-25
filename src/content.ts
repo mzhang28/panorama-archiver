@@ -11,7 +11,7 @@ const article = reader.parse();
 const content = article?.textContent;
 
 const payload = { url, title, content };
-console.log("payload", JSON.stringify(payload));
+// console.log("payload", JSON.stringify(payload));
 
 async function main() {
   window.addEventListener("load", async () => {

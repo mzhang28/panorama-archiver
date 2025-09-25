@@ -32,35 +32,82 @@ db.run(`
 
   CREATE VIRTUAL TABLE IF NOT EXISTS vecs using vec0(
     record_id INTEGER,
+    start INTEGER,
+    end INTEGER,
     embedding float[384]
   );
 `);
+
+interface Record {
+  record_id: number,
+  url: string,
+  start: number,
+  end: number,
+  title: string,
+  distance: number,
+}
+
+async function search(query: string): Promise<Record[]> {
+      const embedding = await embedder(query);
+      const bindings = JSON.stringify(embedding.tolist()[0][0]);
+      console.log("bindings", bindings);
+      const result:Record[] = db
+        .query(
+          `
+select Q.record_id,
+       start,
+       end,
+       url,
+       title,
+       substr(content, start, end) as snippet,
+       min(distance) as distance
+from (
+    select record_id, start, end, distance
+    from vecs
+    where embedding match ?
+    order by distance asc
+    limit 100
+) as Q
+join records on records.record_id = Q.record_id
+group by Q.record_id
+order by distance asc
+limit 5
+        `,
+        )
+        .all(bindings);
+        return result;
+}
 
 const result = Bun.serve({
   port: 1729,
 
   routes: {
+    "/": async (req: BunRequest) => {
+      let results:Record[] = [];
+      if (req.method === "POST") {
+        const params = new URLSearchParams( await req.text())
+        const query=params.get("query")
+      if (!query) return Response.error();
+        results = await search(query);
+      }
+      
+      return new Response(`
+      <style>
+        ul { display: flex; flex-direction: column; list-style-type: none; padding: 0; gap: 1rem; }
+        ul.list li { border: 1px solid gray; padding: 1rem; }
+        ul.list li h3 { margin: 0; }
+      </style>
+      <div class=container> <form method=POST>
+        <input type=text name=query placeholder="Search..." />
+        ${results && `<ul class=list>${results.map(result => `<li><a href="${result.url}" target=_blank rel=noopener><h3>${result.title}</h3><small>${result.url}</small></a><p>${result.snippet}</p>`)}</ul>`}
+      </form> </div>
+    `, {headers: {"Content-Type": "text/html"}})
+  },
+
     "/api/search": async (req: BunRequest) => {
       const url = new URL(req.url);
       const query = url.searchParams.get("query");
       if (!query) return Response.error();
-      const embedding = await embedder(query);
-      const bindings = JSON.stringify(embedding.tolist()[0][0]);
-      console.log("bindings", bindings);
-      const result = db
-        .query(
-          `
-          select Q.record_id, url, distance from (
-        select record_id, distance
-        from vecs
-        where embedding match ?
-        order by distance asc
-        limit 15) as Q
-        join records on records.record_id = Q.record_id
-        `,
-        )
-        .all(bindings);
-      console.log("result", result);
       return Response.json(result);
     },
 
@@ -80,18 +127,19 @@ const result = Bun.serve({
         console.log("Data", JSON.parse(data).content);
         const { content, title, url } = JSON.parse(data);
 
-        const vecs: Tensor[] = [];
+        const vecs: [Tensor, number, number][] = [];
         {
           const windowSize = 1024;
           let i = 0;
           const promises = [];
           while (i < content.length) {
-            const window = content.slice(
-              i,
-              Math.min(i + windowSize, content.length),
-            );
+            const start = i;
+            const end = Math.min(i + windowSize, content.length)
+            const window = content.slice(start,end)
             console.log("window", window);
-            promises.push(embedder(window).then((v) => vecs.push(v)));
+            promises.push(embedder(window).then((v) => {
+              vecs.push([v, start , end])
+          }));
             i += (windowSize / 4) * 3;
           }
           await Promise.all(promises);
@@ -103,11 +151,12 @@ const result = Bun.serve({
           )
           .get(new Date().toISOString(), url, title, content);
 
-        const bindings = vecs.flatMap((v) => [
+        const bindings = vecs.flatMap(([v, start, end]) => [
           record_id,
+          start,end,
           JSON.stringify(v.tolist()[0][0]),
         ]);
-        const sql = `INSERT INTO vecs(record_id, embedding) VALUES ${new Array(vecs.length).fill("(?, ?)").join(", ")}`;
+        const sql = `INSERT INTO vecs(record_id, start, end, embedding) VALUES ${new Array(vecs.length).fill("(?, ?, ?, ?)").join(", ")}`;
         db.run(sql, ...bindings);
       });
 
