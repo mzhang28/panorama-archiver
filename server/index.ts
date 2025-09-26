@@ -2,6 +2,7 @@ import Database from "bun:sqlite";
 import { pipeline, Tensor } from "@xenova/transformers";
 import type { BunRequest } from "bun";
 import { getLoadablePath } from "sqlite-vec";
+import { intlFormatDistance } from "date-fns";
 
 const embedder = await pipeline(
   "feature-extraction",
@@ -39,27 +40,24 @@ db.run(`
 `);
 
 interface Record {
-  record_id: number,
-  url: string,
-  start: number,
-  end: number,
-  title: string,
-  distance: number,
+  record_id: number;
+  url: string;
+  start: number;
+  end: number;
+  title: string;
+  created_at: string;
+  distance: number;
 }
 
 async function search(query: string): Promise<Record[]> {
-      const embedding = await embedder(query);
-      const bindings = JSON.stringify(embedding.tolist()[0][0]);
-      console.log("bindings", bindings);
-      const result:Record[] = db
-        .query(
-          `
-select Q.record_id,
-       start,
-       end,
-       url,
-       title,
-       substr(content, start, end) as snippet,
+  const embedding = await embedder(query);
+  const bindings = JSON.stringify(embedding.tolist()[0][0]);
+  console.log("bindings", bindings);
+  const result: Record[] = db
+    .query(
+      `
+select Q.record_id, start, end, url, title, created_at,
+       substr(content, start, end - start) as snippet,
        min(distance) as distance
 from (
     select record_id, start, end, distance
@@ -73,9 +71,9 @@ group by Q.record_id
 order by distance asc
 limit 5
         `,
-        )
-        .all(bindings);
-        return result;
+    )
+    .all(bindings);
+  return result;
 }
 
 const result = Bun.serve({
@@ -83,26 +81,41 @@ const result = Bun.serve({
 
   routes: {
     "/": async (req: BunRequest) => {
-      let results:Record[] = [];
+      let results: Record[] = [];
+      let query: string = "";
       if (req.method === "POST") {
-        const params = new URLSearchParams( await req.text())
-        const query=params.get("query")
-      if (!query) return Response.error();
+        const params = new URLSearchParams(await req.text());
+        const maybeQuery = params.get("query");
+        if (!maybeQuery) return Response.error();
+        query = maybeQuery;
         results = await search(query);
       }
-      
-      return new Response(`
+
+      const today = new Date();
+      return new Response(
+        `
+      <meta charset="utf-8" /> <meta name="viewport" content="width=device-width, initial-scale=1" />
       <style>
+        body { padding: 1rem; }
+        .container form { margin: auto; max-width: 968px; display: flex; flex-direction: column; gap: 1rem; }
         ul { display: flex; flex-direction: column; list-style-type: none; padding: 0; gap: 1rem; }
         ul.list li { border: 1px solid gray; padding: 1rem; }
         ul.list li h3 { margin: 0; }
       </style>
       <div class=container> <form method=POST>
-        <input type=text name=query placeholder="Search..." />
-        ${results && `<ul class=list>${results.map(result => `<li><a href="${result.url}" target=_blank rel=noopener><h3>${result.title}</h3><small>${result.url}</small></a><p>${result.snippet}</p>`)}</ul>`}
+        <input type=text name=query placeholder="Search..." value="${query}" />
+        ${
+          results &&
+          `<ul class=list>${results.map(
+            (result) =>
+              `<li><a href="${result.url}" target=_blank rel=noopener><h3>${result.title}</h3><small>${intlFormatDistance(new Date(result.created_at), today)} - ${result.url}</small></a><p>${result.snippet}</p>`,
+          )}</ul>`
+        }
       </form> </div>
-    `, {headers: {"Content-Type": "text/html"}})
-  },
+    `,
+        { headers: { "Content-Type": "text/html" } },
+      );
+    },
 
     "/api/search": async (req: BunRequest) => {
       const url = new URL(req.url);
@@ -134,12 +147,14 @@ const result = Bun.serve({
           const promises = [];
           while (i < content.length) {
             const start = i;
-            const end = Math.min(i + windowSize, content.length)
-            const window = content.slice(start,end)
+            const end = Math.min(i + windowSize, content.length);
+            const window = content.slice(start, end);
             console.log("window", window);
-            promises.push(embedder(window).then((v) => {
-              vecs.push([v, start , end])
-          }));
+            promises.push(
+              embedder(window).then((v) => {
+                vecs.push([v, start, end]);
+              }),
+            );
             i += (windowSize / 4) * 3;
           }
           await Promise.all(promises);
@@ -153,7 +168,8 @@ const result = Bun.serve({
 
         const bindings = vecs.flatMap(([v, start, end]) => [
           record_id,
-          start,end,
+          start,
+          end,
           JSON.stringify(v.tolist()[0][0]),
         ]);
         const sql = `INSERT INTO vecs(record_id, start, end, embedding) VALUES ${new Array(vecs.length).fill("(?, ?, ?, ?)").join(", ")}`;
