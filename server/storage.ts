@@ -13,17 +13,25 @@ export class Storage {
   db: Database;
   embedder: (input: string) => Promise<EmbeddingTensor>;
 
-  private constructor(db: Database, embedder: (input: string) => Promise<EmbeddingTensor>) {
+  private constructor(
+    db: Database,
+    embedder: (input: string) => Promise<EmbeddingTensor>,
+  ) {
     this.db = db;
     this.embedder = embedder;
   }
 
   static async create(): Promise<Storage> {
-    const embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+    const embedder = await pipeline(
+      "feature-extraction",
+      "Xenova/all-MiniLM-L6-v2",
+    );
 
     // Try to set a custom sqlite path on systems that need it (macOS/Homebrew).
     try {
-      Database.setCustomSQLite("/opt/homebrew/Cellar/sqlite/3.50.4/lib/libsqlite3.dylib");
+      Database.setCustomSQLite(
+        "/opt/homebrew/Cellar/sqlite/3.50.4/lib/libsqlite3.dylib",
+      );
     } catch (e) {
       console.warn("setCustomSQLite failed:", e);
     }
@@ -31,7 +39,9 @@ export class Storage {
     const db = new Database("dev.db", { create: true });
     db.loadExtension(getLoadablePath());
 
-    const vecInfo = db.prepare("select vec_version() as vec_version;").get() as { vec_version: string } | undefined;
+    const vecInfo = db.prepare("select vec_version() as vec_version;").get() as
+      | { vec_version: string }
+      | undefined;
     if (vecInfo) console.log(`vec_version=${vecInfo.vec_version}`);
 
     db.run(`
@@ -51,14 +61,17 @@ export class Storage {
       );
     `);
 
-    return new Storage(db, embedder as unknown as (input: string) => Promise<EmbeddingTensor>);
+    return new Storage(
+      db,
+      embedder as unknown as (input: string) => Promise<EmbeddingTensor>,
+    );
   }
 
   async search(query: string) {
-  const embedding = await this.embedder(query);
-  const arr = embedding.tolist();
-  const first = arr?.[0]?.[0] ?? [];
-  const bindings = JSON.stringify(first);
+    const embedding = await this.embedder(query);
+    const arr = embedding.tolist();
+    const first = arr?.[0]?.[0] ?? [];
+    const bindings = JSON.stringify(first);
     const result = this.db
       .query(
         `
@@ -103,8 +116,12 @@ limit 5
     await Promise.all(promises);
 
     const insert = this.db
-      .query("INSERT INTO records (created_at, url, title, content) VALUES (?, ?, ?, ?) RETURNING record_id")
-      .get(new Date().toISOString(), url, title, content) as { record_id: number } | undefined;
+      .query(
+        "INSERT INTO records (created_at, url, title, content) VALUES (?, ?, ?, ?) RETURNING record_id",
+      )
+      .get(new Date().toISOString(), url, title, content) as
+      | { record_id: number }
+      | undefined;
 
     if (!insert) return;
 
@@ -119,8 +136,10 @@ limit 5
     });
     const sql = `INSERT INTO vecs(record_id, start, end, embedding) VALUES ${new Array(vecs.length).fill("(?, ?, ?, ?)").join(", ")}`;
     // Bun's sqlite binding accepts a variadic list of bindings; cast to unknown[] to satisfy TS.
-  const normalized = bindings.map((b) => (b === null || b === undefined ? "" : b)) as SQLQueryBindings[];
-  this.db.run(sql, normalized);
+    const normalized = bindings.map((b) =>
+      b === null || b === undefined ? "" : b,
+    ) as SQLQueryBindings[];
+    this.db.run(sql, normalized);
   }
 }
 
