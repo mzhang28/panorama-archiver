@@ -1,43 +1,6 @@
-import Database from "bun:sqlite";
-import { pipeline, Tensor } from "@xenova/transformers";
 import type { BunRequest } from "bun";
-import { getLoadablePath } from "sqlite-vec";
 import { intlFormatDistance } from "date-fns";
-
-const embedder = await pipeline(
-  "feature-extraction",
-  "Xenova/all-MiniLM-L6-v2",
-);
-
-// Fuck you apple
-// https://bun.com/docs/api/sqlite#loadextension
-Database.setCustomSQLite(
-  "/opt/homebrew/Cellar/sqlite/3.50.4/lib/libsqlite3.dylib",
-);
-
-const db = new Database("dev.db", { create: true });
-db.loadExtension(getLoadablePath());
-const { vec_version } = db
-  .prepare("select vec_version() as vec_version;")
-  .get();
-console.log(`vec_version=${vec_version}`);
-
-db.run(`
-  CREATE TABLE IF NOT EXISTS records (
-    record_id INTEGER PRIMARY KEY,
-    created_at DATETIME,
-    url TEXT,
-    title TEXT,
-    content BLOB
-  );
-
-  CREATE VIRTUAL TABLE IF NOT EXISTS vecs using vec0(
-    record_id INTEGER,
-    start INTEGER,
-    end INTEGER,
-    embedding float[384]
-  );
-`);
+import Storage from "./storage";
 
 interface Record {
   record_id: number;
@@ -47,34 +10,10 @@ interface Record {
   title: string;
   created_at: string;
   distance: number;
+  snippet?: string;
 }
 
-async function search(query: string): Promise<Record[]> {
-  const embedding = await embedder(query);
-  const bindings = JSON.stringify(embedding.tolist()[0][0]);
-  console.log("bindings", bindings);
-  const result: Record[] = db
-    .query(
-      `
-select Q.record_id, start, end, url, title, created_at,
-       substr(content, start, end - start) as snippet,
-       min(distance) as distance
-from (
-    select record_id, start, end, distance
-    from vecs
-    where embedding match ?
-    order by distance asc
-    limit 100
-) as Q
-join records on records.record_id = Q.record_id
-group by Q.record_id
-order by distance asc
-limit 5
-        `,
-    )
-    .all(bindings);
-  return result;
-}
+const storage = await Storage.create();
 
 const result = Bun.serve({
   port: 1729,
@@ -88,7 +27,7 @@ const result = Bun.serve({
         const maybeQuery = params.get("query");
         if (!maybeQuery) return Response.error();
         query = maybeQuery;
-        results = await search(query);
+        results = (await storage.search(query)) as Record[];
       }
 
       const today = new Date();
@@ -117,14 +56,15 @@ const result = Bun.serve({
       );
     },
 
-    "/api/search": async (req: BunRequest) => {
+    "/api/search": async (req: BunRequest): Promise<Response> => {
       const url = new URL(req.url);
       const query = url.searchParams.get("query");
       if (!query) return Response.error();
-      return Response.json(result);
+      const res = await storage.search(query);
+      return Response.json(res);
     },
 
-    "/api/store": async (req: BunRequest) => {
+    "/api/store": async (req: BunRequest): Promise<Response> => {
       if (req.method === "OPTIONS") {
         return new Response("", {
           headers: {
@@ -135,50 +75,11 @@ const result = Bun.serve({
         });
       }
 
-      const result = db.transaction(async () => {
-        const data = await req.text();
-        console.log("Data", JSON.parse(data).content);
-        const { content, title, url } = JSON.parse(data);
+      const data = await req.text();
+      const parsed = JSON.parse(data);
+      await storage.store(parsed);
 
-        const vecs: [Tensor, number, number][] = [];
-        {
-          const windowSize = 1024;
-          let i = 0;
-          const promises = [];
-          while (i < content.length) {
-            const start = i;
-            const end = Math.min(i + windowSize, content.length);
-            const window = content.slice(start, end);
-            console.log("window", window);
-            promises.push(
-              embedder(window).then((v) => {
-                vecs.push([v, start, end]);
-              }),
-            );
-            i += (windowSize / 4) * 3;
-          }
-          await Promise.all(promises);
-        }
-
-        const { record_id } = db
-          .query(
-            "INSERT INTO records (created_at, url, title, content) VALUES (?, ?, ?, ?) RETURNING record_id",
-          )
-          .get(new Date().toISOString(), url, title, content);
-
-        const bindings = vecs.flatMap(([v, start, end]) => [
-          record_id,
-          start,
-          end,
-          JSON.stringify(v.tolist()[0][0]),
-        ]);
-        const sql = `INSERT INTO vecs(record_id, start, end, embedding) VALUES ${new Array(vecs.length).fill("(?, ?, ?, ?)").join(", ")}`;
-        db.run(sql, ...bindings);
-      });
-
-      await result();
-
-      return new Response("lol", {
+      return new Response("ok", {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
